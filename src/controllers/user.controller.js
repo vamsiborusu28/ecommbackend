@@ -1,7 +1,7 @@
-import User from '../src/models/user.schema.js';
-import asyncHandler from '../src/service/asyncHandler.js';
-import CustomError from '../src/utils/CustomError.js';
-
+import User from '../models/user.schema.js';
+import asyncHandler from '../service/asyncHandler.js';
+import CustomError from '../utils/CustomError.js';
+import transporter from '../config/transporter.config.js';
 
 const cookieOptions={
  cookieExpiry:Date.now() + 2*24*60*60*1000, // 2days
@@ -115,3 +115,87 @@ export const getProfile=asyncHandler( async(req,res) => {
 })
 
 
+export const forgetPassword= asyncHandler( async (req,res) => {
+    const {email} =req.body;
+
+    if(!email){
+        throw new CustomError("email cannot be empty",400);
+    }
+
+    const user=User.findOne({email});
+
+    if(!user){
+        throw new CustomError("user not found",401);
+    }
+
+
+    const forgetToken=user.generateForgetPasswordToken();
+
+    user.save({validateBeforeSave:false});
+
+    const resetUrl=`${req.protocol}://${req.get('host')}/api/v1/auth/password/reset/${forgetToken}`;
+
+    const message=`Your password reset token is as follows \n\n ${resetUrl} \n\n if this was not requested by you, please ignore.`;
+
+    try{
+       await  transporter.sendMail({
+            email:user.email,
+            subject:'password reset mail',
+            message
+        })
+    }catch(error){
+        user.forgetPasswordToken=undefined;
+        user.forgetPasswordExpiry=undefined;
+
+        user.save({validateBeforeSave:false});
+
+        throw new CustomError(error.message || "email could not be sent" ,500);
+
+    }
+
+});
+
+
+export const resetPassword=asyncHandler( async (req,res) => {
+    // get the data from the front end restToken and password confirmPassword
+
+    const {token:resetToken}=req.params;
+    const {password,confirmPassword}=req.body;
+
+    // decrypt the token and search for it in database
+    const resetPasswordToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+    const user=User.findOne({
+        forgetPasswordToken:resetPasswordToken,
+        forgetPasswordExpiry:{ $gt : Date.now() },
+    })
+
+
+    if(!user){
+        throw new CustomError("token is invalid or expired",400);
+    }
+
+    if(password!==confirmPassword){
+        throw new CustomError("Password does not match",400);
+    }
+
+    user.password=password;
+    user.forgetPasswordToken=undefined;
+    user.forgetPasswordExpiry=undefined;
+
+    user.save();
+
+    // since the password is changed generate JWT Token one more time and send it back to the user
+    const token=user.getJWTToken();
+
+    res.status(200).json({
+        success:true,
+        message:"password is resetted",
+        token,
+        user
+    });
+
+})
